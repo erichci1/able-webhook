@@ -1,88 +1,108 @@
 // src/index.js
-const express        = require("express");
-const { createClient } = require("@supabase/supabase-js");
-const crypto         = require("crypto");
+const express                  = require('express');
+const crypto                   = require('crypto');
+const { createClient }         = require('@supabase/supabase-js');
 
-// ─── 1) Read & validate env vars ───────────────────────────────────────────
-const SUPABASE_URL         = process.env.SUPABASE_URL;
-const SUPABASE_SERVICE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
-const SHOPIFY_SECRET       = process.env.SHOPIFY_WEBHOOK_SECRET;
-const PORT                 = Number(process.env.PORT) || 10000;
+// ─── 1) pull in YOUR FOUR env-vars ──────────────────────────────────────────
+const SUPABASE_URL              = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const SHOPIFY_WEBHOOK_SECRET    = process.env.SHOPIFY_WEBHOOK_SECRET;
+const PORT                      = process.env.PORT || 10000;
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_KEY || !SHOPIFY_SECRET) {
+// sanity-check
+if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
   console.error(
-    "❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, or SHOPIFY_WEBHOOK_SECRET"
+    '❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or SHOPIFY_WEBHOOK_SECRET'
   );
   process.exit(1);
 }
 
-// ─── 2) Initialize Supabase with the service-role key ───────────────────────
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_KEY);
+// ─── 2) init supabase with your service-role key ─────────────────────────────
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-// ─── 3) Configure Express ──────────────────────────────────────────────────
+// ─── 3) wire up express ─────────────────────────────────────────────────────
 const app = express();
 
-// Only raw JSON on the webhook route for HMAC verification
+// only this route needs the raw body so we can verify Shopify’s HMAC
 app.post(
-  "/webhook",
-  express.raw({ type: "application/json" }),
+  '/webhook',
+  express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      // 3a) Verify Shopify HMAC
-      const hmacHeader = req.get("x-shopify-hmac-sha256") || "";
-      const digest = crypto
-        .createHmac("sha256", SHOPIFY_SECRET)
-        .update(req.body)
-        .digest("base64");
+      // --- 3a) verify Shopify HMAC
+      const hmacHeader = req.get('x-shopify-hmac-sha256') || '';
+      const bodyBuffer = req.body;
+      const computedHmac = crypto
+        .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+        .update(bodyBuffer)
+        .digest('base64');
 
-      if (digest !== hmacHeader) {
-        console.error("❌ HMAC mismatch", { digest, hmacHeader });
-        return res.status(401).send("Unauthorized");
+      if (computedHmac !== hmacHeader) {
+        console.error('❌ HMAC mismatch', { computedHmac, hmacHeader });
+        return res.status(401).send('unauthorized');
       }
 
-      // 3b) Parse the payload
-      const event = JSON.parse(req.body.toString("utf8"));
-      console.log("📬 Shopify webhook:", req.get("x-shopify-topic"), event);
+      // --- 3b) parse JSON payload
+      const payload = JSON.parse(bodyBuffer.toString('utf8'));
+      console.log('📬 Shopify webhook:', req.get('x-shopify-topic'), payload);
 
-      // 3c) Only handle order creation
-      if (req.get("x-shopify-topic") === "orders/create") {
-        const email = event.email;
-        const fullName = [
-          event.customer?.first_name,
-          event.customer?.last_name,
-        ]
-          .filter(Boolean)
-          .join(" ");
+      // --- 3c) only handle order-creation
+      if (req.get('x-shopify-topic') === 'orders/create') {
+        const email     = payload.email;
+        const firstName = payload.customer?.first_name  || '';
+        const lastName  = payload.customer?.last_name   || '';
+        const fullName  = [firstName, lastName].filter(Boolean).join(' ');
 
-        // 3d) Create a Supabase user via Admin API
-        const { data, error } = await supabase.auth.admin.createUser({
-          email,
-          password: Math.random().toString(36).slice(-8),
-          email_confirm: true,
-          user_metadata: { full_name: fullName },
-        });
+        // --- 3d) create the Supabase Auth user
+        const { data: userData, error: userError } =
+          await supabase.auth.admin.createUser({
+            email,
+            password:         Math.random().toString(36).slice(-8), // temp random
+            email_confirm:    true,
+            user_metadata:    { first_name: firstName, full_name }
+          });
 
-        if (error) {
-          console.error("❌ Supabase signup error", error);
-          return res.status(500).send("Error creating user");
+        if (userError) {
+          console.error('❌ Supabase signup error', {
+            status:  userError.status,
+            code:    userError.code,
+            message: userError.message,
+            details: userError.details
+          });
+          return res.status(500).send('error creating user');
         }
+        console.log(`🎉 Supabase user created: ${userData.user.id}`);
 
-        console.log(`🎉 Supabase user created: ${data.user.id}`);
+        // --- 3e) upsert their row into public.profiles
+        const { error: profileError } = await supabase
+          .from('profiles')
+          .upsert({
+            id:         userData.user.id,
+            email,
+            first_name: firstName,
+            full_name:  fullName,
+          }, { onConflict: 'id' });
+
+        if (profileError) {
+          console.error('❌ Profile upsert error', profileError);
+          return res.status(500).send('error creating profile');
+        }
+        console.log(`✅ Profile written: ${fullName} <${email}>`);
       }
 
-      // 3e) Ack
-      res.status(200).send("OK");
+      // ack to Shopify
+      res.status(200).send('OK');
     } catch (err) {
-      console.error("🔥 Webhook handler error", err);
-      res.status(500).send("Internal error");
+      console.error('🔥 Webhook handler error', err);
+      res.status(500).send('internal error');
     }
   }
 );
 
-// Fallback for everything else
-app.use((req, res) => res.status(404).send("Not found"));
+// everything else → 404
+app.use((_req, res) => res.status(404).send('not found'));
 
-// ─── 4) Start listening ───────────────────────────────────────────────────
+// ─── 4) start listening ─────────────────────────────────────────────────────
 app.listen(PORT, () => {
   console.log(`🚀 Webhook listener running on port ${PORT}`);
 });
