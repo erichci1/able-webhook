@@ -1,28 +1,27 @@
-import express from "express"
-import dotenv from "dotenv"
-import { createClient } from "@supabase/supabase-js"
-import crypto from "crypto"
+// index.js
+import express from "express";
 
-dotenv.config()
+const app = express();
 
-const app = express()
-// Shopify needs the raw body to verify HMAC
-app.use(express.raw({ type: "application/json" }))
+// JSON body parsing (needed if Shopify sends JSON)
+app.use(express.json());
 
-// Grab the port Render will assign us
-const PORT = process.env.PORT || 3000
+// A simple GET so we know the server is live
+app.get("/", (_req, res) => {
+  res.send("👍 Webhook service is live");
+});
 
-// Health check so we can verify the server is up
-app.get("/", (req, res) => {
-  res.send("🟢 A.B.L.E. webhook server is alive!")
-})
+// A minimal POST handler at /webhook
+app.post("/webhook", (req, res) => {
+  console.log("📬 Got webhook!");
+  console.log("Headers:", req.headers);
+  console.log("Body:", JSON.stringify(req.body).slice(0, 2000));
+  // For now, just acknowledge receipt
+  res.status(200).json({ received: true });
+});
 
-// Your webhook handler:
-app.post("/webhook/orders/paid", async (req, res) => {
-  // …your HMAC check & Supabase upsert logic…
-})
-
-// Start listening
-app.listen(PORT, () => {
-  console.log(`✅ Server listening on port ${PORT}`)
-})
+// Bind to the PORT Render provides (or default 3000 locally)
+const port = process.env.PORT || 3000;
+app.listen(port, () => {
+  console.log(`➡️  Listening on port ${port}`);
+});
