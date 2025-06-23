@@ -44,45 +44,38 @@ app.post(
       const event = JSON.parse(req.body.toString('utf8'));
       console.log('📬 Shopify webhook orders/create', event);
 
-      if (req.get('x-shopify-topic') === 'orders/create') {
-        // c) Extract user info
-        const email     = event.email;
-        const firstName = event.customer?.first_name || '';
-        const lastName  = event.customer?.last_name  || '';
-        const fullName  = `${firstName} ${lastName}`.trim();
+      // …
+if (req.get('x-shopify-topic') === 'orders/create') {
+  const email     = event.email;
+  const firstName = event.customer?.first_name || '';
+  const lastName  = event.customer?.last_name  || '';
+  const fullName  = `${firstName} ${lastName}`.trim();
 
-        // d) Create Supabase Auth user
-        const { data: user, error: authError } = await supabase.auth.admin.createUser({
-          email,
-          password      : Math.random().toString(36).slice(-8),
-          email_confirm : true,
-          user_metadata : { full_name: fullName, first_name }
-        });
+  const { data: user, error: authError } = await supabase.auth.admin.createUser({
+    email,
+    password      : Math.random().toString(36).slice(-8),
+    email_confirm : true,
+    user_metadata : { 
+      full_name: fullName, 
+      first_name: firstName   // <— fixed!
+    }
+  });
 
-        if (authError) {
-          console.error('❌ Supabase signup error', {
-            message: authError.message,
-            code:    authError.code,
-            details: authError.details,
-            hint:    authError.hint
-          });
-          return res.status(500).send('error creating user');
-        }
+  if (authError) { /* … */ }
 
-        // e) Insert into profiles table
-        const { error: dbError } = await supabase
-          .from('profiles')
-          .insert({
-            id         : user.id,
-            full_name  : fullName,
-            first_name : firstName,
-            email
-          });
+  const { error: dbError } = await supabase
+    .from('profiles')
+    .insert({
+      id         : user.id,
+      full_name  : fullName,
+      first_name : firstName,
+      email
+    });
+  if (dbError) { /* … */ }
 
-        if (dbError) {
-          console.error('❌ Supabase profiles insert error', dbError);
-          return res.status(500).send('error writing profile');
-        }
+  console.log(`🎉 Created user+profile: ${user.id}`);
+}
+
 
         console.log(`🎉 Created user+profile: ${user.id}`);
       }
