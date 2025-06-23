@@ -1,7 +1,7 @@
 // src/index.cjs
-const express      = require('express');
-const { createClient } = require('@supabase/supabase-js');
-const crypto       = require('crypto');
+const express           = require('express');
+const { createClient }  = require('@supabase/supabase-js');
+const crypto            = require('crypto');
 
 // 1️⃣ Pull in env vars
 const {
@@ -16,13 +16,13 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
   process.exit(1);
 }
 
-// 2️⃣ Init Supabase with your service-role key
+// 2️⃣ Init Supabase with service-role key
 const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
 // 3️⃣ Wire up Express
 const app = express();
 
-// Only raw JSON for Shopify (so we can validate HMAC)
+// Only raw JSON for Shopify (so we can verify HMAC)
 app.post(
   '/webhook',
   express.raw({ type: 'application/json' }),
@@ -40,18 +40,18 @@ app.post(
         return res.status(401).send('unauthorized');
       }
 
-      // b) Parse the JSON payload
+      // b) Parse JSON payload
       const event = JSON.parse(req.body.toString('utf8'));
       console.log('📬 Shopify webhook orders/create', event);
 
-      // c) Only on order creation
       if (req.get('x-shopify-topic') === 'orders/create') {
+        // c) Extract user info
         const email     = event.email;
         const firstName = event.customer?.first_name || '';
         const lastName  = event.customer?.last_name  || '';
         const fullName  = `${firstName} ${lastName}`.trim();
 
-        // d) Create a Supabase Auth user
+        // d) Create Supabase Auth user
         const { data: user, error: authError } = await supabase.auth.admin.createUser({
           email,
           password      : Math.random().toString(36).slice(-8),
@@ -69,7 +69,7 @@ app.post(
           return res.status(500).send('error creating user');
         }
 
-        // e) Insert into your `profiles` table
+        // e) Insert into profiles table
         const { error: dbError } = await supabase
           .from('profiles')
           .insert({
@@ -95,7 +95,7 @@ app.post(
   }
 );
 
-// 4️⃣ Fallback & start server
+// 4️⃣ Fallback & start
 app.use((_req, res) => res.status(404).send('not found'));
 app.listen(PORT, () => {
   console.log(`🚀 Webhook listener running on port ${PORT}`);
