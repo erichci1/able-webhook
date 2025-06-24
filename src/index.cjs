@@ -4,7 +4,7 @@ const express = require('express');
 const crypto  = require('crypto');
 const { createClient } = require('@supabase/supabase-js');
 
-// 1️⃣ Env
+// 1️⃣ Pull in env vars
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -12,15 +12,24 @@ const {
   SHOPIFY_WEBHOOK_SECRET,
   PORT = 10000
 } = process.env;
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SUPABASE_ANON_KEY || !SHOPIFY_WEBHOOK_SECRET) {
-  console.error('❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY or SHOPIFY_WEBHOOK_SECRET');
+
+if (
+  !SUPABASE_URL ||
+  !SUPABASE_SERVICE_ROLE_KEY ||
+  !SUPABASE_ANON_KEY ||
+  !SHOPIFY_WEBHOOK_SECRET
+) {
+  console.error(
+    '❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, SUPABASE_ANON_KEY or SHOPIFY_WEBHOOK_SECRET'
+  );
   process.exit(1);
 }
 
-// two clients: one as admin (for table inserts), one as anon (for OTP)
+// 2️⃣ Init two Supabase clients
 const supabaseAdmin = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 const supabaseAnon  = createClient(SUPABASE_URL, SUPABASE_ANON_KEY);
 
+// 3️⃣ Wire up Express
 const app = express();
 
 app.post(
@@ -28,7 +37,7 @@ app.post(
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      // ─── Verify Shopify HMAC ───────────────────────────
+      // a) Verify Shopify HMAC
       const hmacHeader = req.get('x-shopify-hmac-sha256') || '';
       const digest = crypto
         .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
@@ -39,34 +48,36 @@ app.post(
         return res.status(401).send('unauthorized');
       }
 
-      // ─── Parse & guard ─────────────────────────────────
+      // b) Parse the payload
       const event = JSON.parse(req.body.toString('utf8'));
       console.log('📬 Shopify payload', event);
       if (req.get('x-shopify-topic') !== 'orders/create') {
         return res.status(200).send('ignored');
       }
 
-      // ─── Extract user info ─────────────────────────────
+      // c) Extract user info
       const cust      = event.customer || {};
-      const firstName = cust.first_name || '';
-      const lastName  = cust.last_name  || '';
+      const firstName = String(cust.first_name || '');
+      const lastName  = String(cust.last_name  || '');
       const fullName  = [firstName, lastName].filter(Boolean).join(' ');
-      const email     = event.email || '';
+      const email     = String(event.email || '');
 
-      // ─── Send magic link (this auto-creates the user) ──
-      const { error: otpError } = await supabaseAnon.auth.signInWithOtp({ email });
+      // d) Send magic link (this auto-creates the user)
+      const { error: otpError } = await supabaseAnon.auth.signInWithOtp({
+        email
+      });
       if (otpError) {
         console.error('❌ OTP send failed:', otpError);
         return res.status(500).send('error sending magic link');
       }
       console.log('✉️ Magic link sent to', email);
 
-      // ─── Insert profile row (service-role) ────────────
+      // e) Upsert the profile row yourself
       const { error: dbError } = await supabaseAdmin
         .from('profiles')
         .upsert(
           {
-            id:         email,       // or use email as PK, or fetch user.id later
+            id:         email,
             first_name: firstName,
             full_name:  fullName,
             email
@@ -74,22 +85,4 @@ app.post(
           { onConflict: 'id' }
         );
       if (dbError) {
-        console.error('❌ Profile upsert failed:', dbError);
-        return res.status(500).send('error writing profile');
-      }
-      console.log(`✅ Profile upserted for ${email}`);
-
-      return res.status(200).send('OK');
-
-    } catch (err) {
-      console.error('🔥 Handler error', err);
-      return res.status(500).send('internal error');
-    }
-  }
-);
-
-// 404 & start
-app.use((_req, res) => res.status(404).send('not found'));
-app.listen(PORT, () => {
-  console.log(`🚀 Listening on port ${PORT}`);
-});
+        console.e
