@@ -1,106 +1,73 @@
-// src/index.cjs
-const express = require('express');
-const crypto  = require('crypto');
-const fetch   = require('node-fetch'); // ensure installed via npm install node-fetch@2
+// supabase/functions/shopify-webhook/index.ts
 
-// 1) Env
-const {
-  SUPABASE_URL,
-  SUPABASE_SERVICE_ROLE_KEY,
-  SHOPIFY_WEBHOOK_SECRET,
-  PORT = 10000
-} = process.env;
+import { serve } from "https://deno.land/std@0.177.0/http/server.ts";
+import { createClient } from "https://esm.sh/@supabase/supabase-js@^2";
+import { createHmac } from "https://deno.land/std@0.177.0/node/crypto.ts";
 
-if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
-  console.error('❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or SHOPIFY_WEBHOOK_SECRET');
-  process.exit(1);
-}
+// 1️⃣ Pull in your secrets
+const SUPABASE_URL              = Deno.env.get("DB_URL")!;
+const SUPABASE_SERVICE_ROLE_KEY = Deno.env.get("SERVICE_ROLE_KEY")!;
+const SHOPIFY_WEBHOOK_SECRET    = Deno.env.get("SHOPIFY_WEBHOOK_SECRET")!;
 
-const app = express();
+// 2️⃣ Init Supabase admin client
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
 
-app.post(
-  '/webhook',
-  express.raw({ type: 'application/json' }),
-  async (req, res) => {
-    try {
-      // a) Verify Shopify HMAC
-      const hmac = req.get('x-shopify-hmac-sha256') || '';
-      const digest = crypto
-        .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-        .update(req.body)
-        .digest('base64');
-      if (digest !== hmac) return res.status(401).send('unauthorized');
-
-      // b) Parse payload & bail
-      const event = JSON.parse(req.body.toString('utf8'));
-      console.log('📬 Shopify payload', event);
-      if (req.get('x-shopify-topic') !== 'orders/create') {
-        return res.status(200).send('ignored');
-      }
-
-      // c) Compute names + email
-      const cust    = event.customer        || {};
-      const bill   = event.billing_address || {};
-      const firstName = cust.first_name || bill.first_name || '';
-      const lastName  = cust.last_name  || bill.last_name  || '';
-      const fullName  = [firstName, lastName].filter(Boolean).join(' ');
-      const email     = event.email || '';
-
-      // d) Create user
-      const adminUrl = `${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/admin/users`;
-      const password = Math.random().toString(36).slice(-8);
-      const createRes = await fetch(adminUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type':  'application/json',
-          apikey:           SUPABASE_SERVICE_ROLE_KEY,
-          Authorization:    `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
-        },
-        body: JSON.stringify({
-          email,
-          password,
-          email_confirm: true,
-          raw_user_meta_data: { first_name: firstName, full_name: fullName }
-        })
-      });
-      const userData = await createRes.json();
-      if (!createRes.ok) {
-        console.error('❌ admin.createUser error', userData);
-        return res.status(500).send('error creating user');
-      }
-      console.log('🎉 Created auth user:', userData.id);
-
-      // e) Upsert profile
-      const profilesUrl = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/profiles`;
-      const insertRes = await fetch(profilesUrl, {
-        method: 'POST',
-        headers: {
-          'Content-Type':  'application/json',
-          apikey:           SUPABASE_SERVICE_ROLE_KEY,
-          Authorization:    `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
-          Prefer:           'resolution=merge-duplicates'
-        },
-        body: JSON.stringify({
-          id:         userData.id,
-          first_name: firstName,
-          full_name:  fullName,
-          email
-        })
-      });
-      if (!insertRes.ok) {
-        const errText = await insertRes.text();
-        console.error('❌ profiles upsert error', errText);
-        return res.status(500).send('error writing profile');
-      }
-      console.log(`✅ Profile upserted for ${userData.id}`);
-
-      res.status(200).send('OK');
-    } catch (err) {
-      console.error('🔥 Handler error', err);
-      res.status(500).send('internal error');
-    }
+serve(async (req) => {
+  // Only POST /shopify-webhook
+  const url = new URL(req.url);
+  if (req.method !== "POST" || url.pathname !== "/shopify-webhook") {
+    return new Response("Not found", { status: 404 });
   }
-);
 
-app.use((_req, res) => res.status(404).send('not found'));
-app.listen(PORT, () => console.log(`🚀 Listening on port ${PORT}`));
+  // a) Verify Shopify HMAC
+  const body = await req.text();
+  const hmacHeader = req.headers.get("x-shopify-hmac-sha256") || "";
+  const digest = createHmac("sha256", SHOPIFY_WEBHOOK_SECRET)
+    .update(body)
+    .digest("base64");
+  if (digest !== hmacHeader) {
+    console.error("❌ HMAC mismatch", { digest, hmacHeader });
+    return new Response("unauthorized", { status: 401 });
+  }
+
+  // b) Parse and filter for orders/create
+  const topic = req.headers.get("x-shopify-topic");
+  const event = JSON.parse(body);
+  console.log("📬 Shopify payload", event);
+  if (topic !== "orders/create") {
+    return new Response("ignored", { status: 200 });
+  }
+
+  // c) Compute name & email with fallbacks
+  const cust     = event.customer        || {};
+  const billing  = event.billing_address || {};
+  const firstName = cust.first_name || billing.first_name || "";
+  const lastName  = cust.last_name  || billing.last_name  || "";
+  const fullName  = [firstName, lastName].filter(Boolean).join(" ");
+  const email     = event.email || "";
+
+  // d) Create Supabase Auth user
+  const { data: user, error: authErr } = await supabase.auth.admin.createUser({
+    email,
+    password:      Math.random().toString(36).slice(-8),
+    email_confirm: true,
+    raw_user_meta_data: { first_name: firstName, full_name: fullName },
+  });
+  if (authErr) {
+    console.error("❌ admin.createUser error", authErr);
+    return new Response("error creating user", { status: 500 });
+  }
+  console.log("🎉 Created user", user.id);
+
+  // e) Upsert profile row
+  const { error: dbErr } = await supabase
+    .from("profiles")
+    .upsert({ id: user.id, first_name: firstName, full_name: fullName, email });
+  if (dbErr) {
+    console.error("❌ profiles upsert error", dbErr);
+    return new Response("error writing profile", { status: 500 });
+  }
+  console.log("✅ Profile upserted", user.id);
+
+  return new Response("OK", { status: 200 });
+});
