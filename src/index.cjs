@@ -1,63 +1,103 @@
 // src/index.cjs
-const express       = require('express');
-const crypto        = require('crypto');
-const { createClient } = require('@supabase/supabase-js');
+const express = require('express');
+const crypto  = require('crypto');
+const fetch   = require('node-fetch');
 
-// env
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
   SHOPIFY_WEBHOOK_SECRET,
   PORT = 10000
 } = process.env;
+
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
-  console.error('❌ Missing env vars'); process.exit(1);
+  console.error('❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or SHOPIFY_WEBHOOK_SECRET');
+  process.exit(1);
 }
 
-const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
-const app      = express();
-
+const app = express();
 app.post(
   '/webhook',
   express.raw({ type: 'application/json' }),
   async (req, res) => {
-    // 1) Verify HMAC…
-    const hmacHeader = req.get('x-shopify-hmac-sha256') || '';
-    const digest = crypto.createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
-      .update(req.body)
-      .digest('base64');
-    if (digest !== hmacHeader) return res.status(401).send('unauthorized');
+    try {
+      // 1) Verify Shopify HMAC
+      const hmac = req.get('x-shopify-hmac-sha256') || '';
+      const digest = crypto
+        .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
+        .update(req.body)
+        .digest('base64');
+      if (digest !== hmac) return res.status(401).send('unauthorized');
 
-    // 2) Parse & bail if not orders/create
-    const event = JSON.parse(req.body.toString('utf8'));
-    if (req.get('x-shopify-topic') !== 'orders/create') {
-      return res.status(200).send('ignored');
-    }
-
-    // 3) Extract name + email
-    const cust      = event.customer || {};
-    const firstName = cust.first_name || '';
-    const lastName  = cust.last_name  || '';
-    const fullName  = [firstName, lastName].filter(Boolean).join(' ');
-    const email     = event.email;
-
-    // 4) Create Supabase user with metadata only
-    const { data:user, error } = await supabase.auth.admin.createUser({
-      email,
-      password      : Math.random().toString(36).slice(-8),
-      email_confirm : true,
-      raw_user_meta_data: {
-        first_name: firstName,
-        full_name:  fullName
+      // 2) Parse & bail on non-orders/create
+      const event = JSON.parse(req.body.toString('utf8'));
+      console.log('📬 Shopify payload', event);
+      if (req.get('x-shopify-topic') !== 'orders/create') {
+        return res.status(200).send('ignored');
       }
-    });
-    if (error) {
-      console.error('❌ admin.createUser error', error);
-      return res.status(500).send('error creating user');
+
+      // 3) Extract name & email (safe defaults)
+      const cust      = event.customer || {};
+      const firstName = cust.first_name || '';
+      const lastName  = cust.last_name  || '';
+      const fullName  = [firstName, lastName].filter(Boolean).join(' ');
+      const email     = event.email;
+
+      // 4) Create the user via Admin API
+      const adminUrl = `${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/admin/users`;
+      const password = Math.random().toString(36).slice(-8);
+      const createRes = await fetch(adminUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          apikey:           SUPABASE_SERVICE_ROLE_KEY,
+          Authorization:    `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+        },
+        body: JSON.stringify({
+          email,
+          password,
+          email_confirm: true,
+          raw_user_meta_data: { first_name: firstName, full_name }
+        })
+      });
+      const userData = await createRes.json();
+      if (!createRes.ok) {
+        console.error('❌ admin.createUser error', userData);
+        return res.status(500).send('error creating user');
+      }
+      console.log('🎉 Created auth user:', userData.id);
+
+      // 5) Upsert into profiles in the same request
+      const profilesUrl = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/profiles`;
+      const insertRes = await fetch(profilesUrl, {
+        method: 'POST',
+        headers: {
+          'Content-Type':  'application/json',
+          apikey:           SUPABASE_SERVICE_ROLE_KEY,
+          Authorization:    `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`,
+          Prefer:           'resolution=merge-duplicates'
+        },
+        body: JSON.stringify({
+          id:         userData.id,
+          first_name: firstName,
+          full_name,
+          email
+        })
+      });
+      if (!insertRes.ok) {
+        const err = await insertRes.text();
+        console.error('❌ profiles upsert error', err);
+        return res.status(500).send('error writing profile');
+      }
+      console.log(`✅ Profile upserted for ${userData.id}`);
+
+      return res.status(200).send('OK');
+    } catch (err) {
+      console.error('🔥 Handler error', err);
+      return res.status(500).send('internal error');
     }
-    console.log('🎉 Created auth user:', user.id);
-    return res.status(200).send('OK');
   }
 );
 
-app.listen(PORT, () => console.log(`🚀 Listening on ${PORT}`));
+app.use((_req, res) => res.status(404).send('not found'));
+app.listen(PORT, () => console.log(`🚀 Running on port ${PORT}`));
