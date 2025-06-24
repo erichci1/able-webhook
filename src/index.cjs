@@ -2,7 +2,7 @@
 
 const express = require('express');
 const crypto  = require('crypto');
-const fetch   = require('node-fetch');
+const fetch   = require('node-fetch'); // npm install node-fetch@2
 
 // 1️⃣ Env
 const {
@@ -23,7 +23,7 @@ app.post(
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      //─── Verify HMAC ────────────────────────────────────
+      //─── 1. Verify Shopify HMAC ────────────────────────
       const hmacHeader = req.get('x-shopify-hmac-sha256') || '';
       const digest = crypto
         .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
@@ -34,19 +34,20 @@ app.post(
         return res.status(401).send('unauthorized');
       }
 
-      //─── Parse & guard payload ──────────────────────────
+      //─── 2. Parse & guard ──────────────────────────────
       const event = JSON.parse(req.body.toString('utf8'));
       console.log('📬 Shopify payload', event);
       if (req.get('x-shopify-topic') !== 'orders/create') {
         return res.status(200).send('ignored');
       }
+
       const cust      = event.customer || {};
       const firstName = String(cust.first_name || '');
       const lastName  = String(cust.last_name  || '');
-      const fullName  = [firstName, lastName].filter(Boolean).join(' ');
+      const fullName  = [firstName, lastName].filter(Boolean).join(' ') || '';
       const email     = String(event.email || '');
 
-      //─── Create the Auth user via Admin API ────────────
+      //─── 3. Create Auth user ───────────────────────────
       const adminUrl = `${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/admin/users`;
       const password = Math.random().toString(36).slice(-8);
       const createRes = await fetch(adminUrl, {
@@ -60,10 +61,8 @@ app.post(
           email,
           password,
           email_confirm: true,
-          raw_user_meta_data: {
-            first_name: firstName,
-            full_name:  fullName
-          }
+          // you can still include metadata for your own use
+          user_metadata: { first_name: firstName, full_name: fullName }
         })
       });
       const userData = await createRes.json();
@@ -73,9 +72,7 @@ app.post(
       }
       console.log('🎉 Created auth user:', userData.id);
 
-      //─── Manually insert into profiles (only if you choose to) ──
-      //    (Skip this if you rely on your DB trigger instead)
-      /*
+      //─── 4. Directly insert into profiles ─────────────────
       const profilesUrl = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/profiles`;
       const insertRes = await fetch(profilesUrl, {
         method: 'POST',
@@ -94,11 +91,10 @@ app.post(
       });
       if (!insertRes.ok) {
         const err = await insertRes.text();
-        console.error('❌ profiles insert failed:', err);
+        console.error('❌ Profile insert failed:', err);
         return res.status(500).send('error writing profile');
       }
       console.log(`✅ Profile created for ${userData.id}`);
-      */
 
       return res.status(200).send('OK');
     } catch (err) {
@@ -110,5 +106,5 @@ app.post(
 
 app.use((_req, res) => res.status(404).send('not found'));
 app.listen(PORT, () => {
-  console.log(`🚀 Listening on port ${PORT}`);
+  console.log(`🚀 Webhook listener running on port ${PORT}`);
 });
