@@ -1,8 +1,9 @@
 // src/index.cjs
 const express = require('express');
 const crypto  = require('crypto');
-const fetch   = require('node-fetch'); // npm install node-fetch@2
+const fetch   = require('node-fetch'); // ensure installed via npm install node-fetch@2
 
+// 1) Env
 const {
   SUPABASE_URL,
   SUPABASE_SERVICE_ROLE_KEY,
@@ -10,7 +11,6 @@ const {
   PORT = 10000
 } = process.env;
 
-// --- 1) ENV check ---
 if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
   console.error('❌ Missing one of SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY or SHOPIFY_WEBHOOK_SECRET');
   process.exit(1);
@@ -18,45 +18,41 @@ if (!SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY || !SHOPIFY_WEBHOOK_SECRET) {
 
 const app = express();
 
-// --- 2) Webhook handler ---
 app.post(
   '/webhook',
   express.raw({ type: 'application/json' }),
   async (req, res) => {
     try {
-      // a) Verify HMAC
-      const hmacHeader = req.get('x-shopify-hmac-sha256') || '';
+      // a) Verify Shopify HMAC
+      const hmac = req.get('x-shopify-hmac-sha256') || '';
       const digest = crypto
         .createHmac('sha256', SHOPIFY_WEBHOOK_SECRET)
         .update(req.body)
         .digest('base64');
-      if (digest !== hmacHeader) {
-        console.error('❌ HMAC mismatch', { digest, hmacHeader });
-        return res.status(401).send('unauthorized');
-      }
+      if (digest !== hmac) return res.status(401).send('unauthorized');
 
-      // b) Parse & ignore non-orders/create
+      // b) Parse payload & bail
       const event = JSON.parse(req.body.toString('utf8'));
       console.log('📬 Shopify payload', event);
       if (req.get('x-shopify-topic') !== 'orders/create') {
         return res.status(200).send('ignored');
       }
 
-      // c) Compute name & email with fallbacks
+      // c) Compute names + email
       const cust    = event.customer        || {};
-      const billing = event.billing_address || {};
-      const firstName = cust.first_name || billing.first_name || '';
-      const lastName  = cust.last_name  || billing.last_name  || '';
+      const bill   = event.billing_address || {};
+      const firstName = cust.first_name || bill.first_name || '';
+      const lastName  = cust.last_name  || bill.last_name  || '';
       const fullName  = [firstName, lastName].filter(Boolean).join(' ');
       const email     = event.email || '';
 
-      // d) Create the Supabase Auth user
+      // d) Create user
       const adminUrl = `${SUPABASE_URL.replace(/\/$/, '')}/auth/v1/admin/users`;
       const password = Math.random().toString(36).slice(-8);
       const createRes = await fetch(adminUrl, {
         method: 'POST',
         headers: {
-          'Content-Type': 'application/json',
+          'Content-Type':  'application/json',
           apikey:           SUPABASE_SERVICE_ROLE_KEY,
           Authorization:    `Bearer ${SUPABASE_SERVICE_ROLE_KEY}`
         },
@@ -64,7 +60,7 @@ app.post(
           email,
           password,
           email_confirm: true,
-          raw_user_meta_data: { first_name: firstName, full_name }
+          raw_user_meta_data: { first_name: firstName, full_name: fullName }
         })
       });
       const userData = await createRes.json();
@@ -74,7 +70,7 @@ app.post(
       }
       console.log('🎉 Created auth user:', userData.id);
 
-      // e) Upsert into profiles
+      // e) Upsert profile
       const profilesUrl = `${SUPABASE_URL.replace(/\/$/, '')}/rest/v1/profiles`;
       const insertRes = await fetch(profilesUrl, {
         method: 'POST',
@@ -87,7 +83,7 @@ app.post(
         body: JSON.stringify({
           id:         userData.id,
           first_name: firstName,
-          full_name,
+          full_name:  fullName,
           email
         })
       });
@@ -98,14 +94,13 @@ app.post(
       }
       console.log(`✅ Profile upserted for ${userData.id}`);
 
-      return res.status(200).send('OK');
+      res.status(200).send('OK');
     } catch (err) {
       console.error('🔥 Handler error', err);
-      return res.status(500).send('internal error');
+      res.status(500).send('internal error');
     }
   }
 );
 
-// --- 3) Fallback & start ---
 app.use((_req, res) => res.status(404).send('not found'));
 app.listen(PORT, () => console.log(`🚀 Listening on port ${PORT}`));
