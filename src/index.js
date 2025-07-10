@@ -8,13 +8,15 @@ app.use(express.json({
   verify: (req, _res, buf) => { req.rawBody = buf.toString("utf8"); }
 }));
 
-// pull from env
-const SHOPIFY_SECRET               = process.env.SHOPIFY_WEBHOOK_SECRET!;
-const SUPABASE_URL                 = process.env.SUPABASE_URL!;
-const SUPABASE_SERVICE_ROLE_KEY    = process.env.SUPABASE_SERVICE_ROLE_KEY!;
+const SHOPIFY_SECRET            = process.env.SHOPIFY_WEBHOOK_SECRET;
+const SUPABASE_URL              = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+
 
 if (!SHOPIFY_SECRET || !SUPABASE_URL || !SUPABASE_SERVICE_ROLE_KEY) {
-  console.error("⚠️ Missing one of SHOPIFY_WEBHOOK_SECRET, SUPABASE_URL, or SUPABASE_SERVICE_ROLE_KEY");
+  console.error(
+    "⚠️ Missing one of SHOPIFY_WEBHOOK_SECRET, SUPABASE_URL, or SUPABASE_SERVICE_ROLE_KEY"
+  );
   process.exit(1);
 }
 
